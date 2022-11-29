@@ -15,4 +15,5 @@ Alternatvie B:
 Use the scripts for univariate or multivariate forecasting.
 
 bash ./scripts/run_M.sh
+
 bash ./scripts/run_S.sh
