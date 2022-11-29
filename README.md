@@ -9,7 +9,7 @@ First masking approach is in the exp/exp_main.py
 ## Get Started:
 
 Alternative A:
-Use the notebook [masking] (https://github.com/DJFKO/self-supervised-FEDformer/blob/main/masking.ipynb) and change the parsed arguments manually. Default dataset is traffic with univariate prediction.
+Use the notebook [masking](https://github.com/DJFKO/self-supervised-FEDformer/blob/main/masking.ipynb) and change the parsed arguments manually. Default dataset is traffic with univariate prediction.
 
 Alternatvie B:
 Use the scripts for univariate or multivariate forecasting.
