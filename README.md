@@ -9,11 +9,9 @@ First masking approach is in the exp/exp_main.py
 ## Get Started:
 
 Alternative A:
-Use the notebook and change the parsed arguments manually. Default dataset is traffic with univariate prediction.
+Use the notebook masking and change the parsed arguments manually. Default dataset is traffic with univariate prediction.
 
 Alternatvie B:
 Use the scripts for univariate or multivariate forecasting.
 bash ./scripts/run_M.sh
 bash ./scripts/run_S.sh
-I commented some lines for test purposes.
-
