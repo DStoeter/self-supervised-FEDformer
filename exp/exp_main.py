@@ -15,10 +15,50 @@ from utils.metrics import metric
 
 warnings.filterwarnings('ignore')
 
-
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
+
+    @staticmethod
+    def get_rand_mask(shape, mu=5, std=10):
+        batch_size = shape[0]
+        len_ds = shape[1]
+        feature_dim = shape[2]
+        #print("batch_size:",batch_size,"len_ds:", len_ds,"feature_dim:",feature_dim)
+        span_size = int(np.random.normal(mu, std)) + 0.1
+        #print("spansize:",span_size)
+        if span_size < 1:
+            span_size = 1
+        if span_size > 1:
+            span_size = 1
+        n_spans = int(len_ds / span_size)
+        #         print(span_size)
+        mask = np.random.choice([False, True], [batch_size, n_spans, feature_dim], p=[0.8, 0.2])
+
+        if not np.all(np.any(mask, axis=1)):
+            rand_true = np.random.randint(n_spans - 1)
+            mask[:, rand_true, :] = True
+
+        mask = np.repeat(mask, span_size, axis=1)
+        ones = np.zeros([batch_size, len_ds - n_spans * span_size, feature_dim], dtype=bool)
+        mask = np.concatenate([mask, ones], axis=1)
+        return torch.tensor(mask, dtype=bool)
+
+    def batch_x_mask(self, batch_x_f):
+        batch_x_tmp = batch_x_f.detach().cpu().numpy()
+        batch_x_tmp = torch.tensor(batch_x_tmp)
+        shape = batch_x_f.shape
+        mask = self.get_rand_mask(shape)
+        zeros = torch.zeros(batch_x_f.shape, dtype=batch_x_f.dtype)
+
+        batch_x_masked = torch.where(mask, batch_x_tmp, zeros)
+
+        batch_x_masked = batch_x_masked.float().to(self.device)
+
+        mask = mask.to(self.device)
+        enc_input = batch_x_f * mask
+
+        return torch.tensor(enc_input), mask
 
     def _build_model(self):
         model_dict = {
@@ -45,28 +85,8 @@ class Exp_Main(Exp_Basic):
         criterion = nn.MSELoss()
         return criterion
 
-    @staticmethod
-    def get_rand_mask(shape, mu=5, std=3):
-        batch_size = shape[0]
-        len_ds = shape[1]
-        feature_dim = shape[2]
-        span_size = int(np.random.normal(mu, std)) + 5
-        if span_size < 1:
-           span_size = 1
-        n_spans = int(len_ds / span_size)
-        #         print(span_size)
-        mask = np.random.choice([False, True], [batch_size, n_spans, feature_dim], p=[0.85, 0.15])
-
-        if not np.all(np.any(mask, axis=1)):
-            rand_true = np.random.randint(n_spans - 1)
-            mask[:, rand_true, :] = True
-
-        mask = np.repeat(mask, span_size, axis=1)
-        ones = np.zeros([batch_size, len_ds - n_spans * span_size, feature_dim], dtype=bool)
-        mask = np.concatenate([mask, ones], axis=1)
-        return torch.tensor(mask, dtype=bool)
-
     def vali(self, vali_data, vali_loader, criterion):
+        use_mask = False
         total_loss = []
         self.model.eval()
         with torch.no_grad():
@@ -74,7 +94,9 @@ class Exp_Main(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
-                batch_x_mark = batch_x_mark.float().to(self.device) #converting numpy array to torch tensor
+                batch_x_ma, master_mask = self.batch_x_mask(batch_x)
+
+                batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
                 # decoder input
@@ -84,14 +106,14 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
@@ -106,10 +128,7 @@ class Exp_Main(Exp_Basic):
         return total_loss
 
     def train(self, setting):
-        print("train function called")
-        preds_t = []
-        trues_t = []
-        folder_path = './test_results/' + setting + '/'
+        use_mask = True
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
@@ -130,150 +149,82 @@ class Exp_Main(Exp_Basic):
             scaler = torch.cuda.amp.GradScaler()
 
         for epoch in range(self.args.train_epochs):
-            print("first loop")
-
             iter_count = 0
             train_loss = []
-            train_loss_masked = []
 
             self.model.train()
             epoch_time = time.time()
-
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
-
-                use_mask = True
-                if use_mask:
-
-                    shape = batch_x.shape
-                    mask = self.get_rand_mask(shape)
-
-                    zeros = torch.zeros(batch_x.shape, dtype=batch_y.dtype)
-                    batch_y_masked = torch.where(mask, batch_x, zeros)
-
-
                 iter_count += 1
+                model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
+                batch_x_tmp = batch_x
+                batch_x_ma, master_mask = self.batch_x_mask(batch_x_tmp)
+                # print("masked output")
+                # plt.plot(batch_x_ma[0])
+                # plt.show()
+
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
-                if use_mask:
-                    batch_y_masked = batch_y_masked.float().to(self.device)
 
                 # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                if use_mask:
-                    dec_inp_masked = torch.zeros_like(batch_y_masked[:, -self.args.pred_len:, :]).float()
-                    dec_inp_masked = torch.cat([batch_y_masked[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                            if use_mask:
-                                outputs_masked = self.model(batch_x, batch_x_mark, dec_inp_masked, batch_y_mark)[0]
+                            outputs = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                            if use_mask:
-                                outputs_masked = self.model(batch_x, batch_x_mark, dec_inp_masked, batch_y_mark)
+                            outputs = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)
 
                         f_dim = -1 if self.args.features == 'MS' else 0
-                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        if use_mask:
-                            mask = mask.to(self.device)
-                            targets = batch_y_masked * mask
-                            outputs_masked = outputs_masked * mask
-
+                        #batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                        batch_y = batch_y[:, :, f_dim:].to(self.device)
                         loss = criterion(outputs, batch_y)
-                        if use_mask:
-                            loss_masked = criterion(outputs_masked, targets)
-
                         train_loss.append(loss.item())
-                        if use_mask:
-                            train_loss_masked.append(loss_masked.item())
-
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                        if use_mask:
-                            outputs_masked = self.model(batch_x, batch_x_mark, dec_inp_masked, batch_y_mark)[0]
-                            print("1")
+                        outputs, masking = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)[0:1]
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                        if use_mask:
-                            outputs_masked = self.model(batch_x, batch_x_mark, dec_inp_masked, batch_y_mark)
+                        outputs, masking = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    if use_mask:
-                        mask = mask.to(self.device)
-                        targets = batch_y_masked * mask
-                        outputs_masked = outputs_masked * mask
+                    #batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    batch_y = batch_y[:, :, f_dim:].to(self.device)
 
+                    loss = criterion(outputs, batch_y)
+                    train_loss.append(loss.item())
 
-
-                if use_mask:
-                    outputs_t_masked = outputs_masked.detach().cpu().numpy()
-                    targets_t_masked = targets.detach().cpu().numpy()
-
-                    pred_t_m = outputs_t_masked
-                    targets_t_m = targets_t_masked
-
-                    loss_masked = criterion(outputs_masked, targets)
-                    train_loss_masked.append(loss_masked.item())
-
-                outputs_t = outputs.detach().cpu().numpy()
-                batch_y_t = batch_y.detach().cpu().numpy()
-                pred_t = outputs_t #.detach().cpu().numpy()  # .squeeze()
-                true_t = batch_y_t #.detach().cpu().numpy()  # .squeeze()
-
-                preds_t.append(pred_t)
-                trues_t.append(true_t)
-                loss = criterion(outputs, batch_y)
-                train_loss.append(loss.item())
-
-
-
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 20 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    outputs_plt = outputs.detach().cpu()
+                    batch_y_plt = batch_y.detach().cpu()
+                    masking_plt = masking.detach().cpu()
+                    plt.rcParams["figure.dpi"] = 100
+                    plt.rcParams['lines.linewidth'] = 0.3
+                    plt.plot(outputs_plt[0], label='prediction')
+                    plt.plot(batch_y_plt[0], label='groundTruth')
+                    plt.plot(masking_plt[0], label='maskedInput')
+                    plt.legend()
+                    plt.show()
+
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
-
-                    input_t = batch_x.detach().cpu().numpy()
-                    print("Prediction")
-                    gt_t = np.concatenate((input_t[0, :, -1], true_t[0, :, -1]), axis=0)
-                    pd_t = np.concatenate((input_t[0, :, -1], pred_t[0, :, -1]), axis=0)
-                    visual(gt_t, pd_t, os.path.join(folder_path, str(i) + '.pdf'))
-
-                    if use_mask:
-                        print("Masked Prediction")
-                        gt_t_m = np.concatenate((input_t[0, :, -1], targets_t_m[0, :, -1]), axis=0)
-                        pd_t_m = np.concatenate((input_t[0, :, -1], pred_t_m[0, :, -1]), axis=0)
-                        visual(gt_t_m, pd_t_m, os.path.join(folder_path, str(i) + '.pdf'))
-
-
-
+                    # print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
                     iter_count = 0
                     time_now = time.time()
-
 
                 if self.args.use_amp:
                     scaler.scale(loss).backward()
                     scaler.step(model_optim)
                     scaler.update()
-                    #if use_mask:
-                        #scaler.scale(loss_masked).backward()
-                        #scaler.step(model_optim)
-                        #scaler.update()
                 else:
                     loss.backward()
                     model_optim.step()
-                    #if use_mask:
-                        #loss.backward()
-                        #model_optim.step()
-
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
@@ -295,6 +246,7 @@ class Exp_Main(Exp_Basic):
         return self.model
 
     def test(self, setting, test=0):
+        use_mask = False
         test_data, test_loader = self._get_data(flag='test')
         if test:
             print('loading model')
@@ -312,6 +264,8 @@ class Exp_Main(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
+                batch_x_ma, master_mask = self.batch_x_mask(batch_x)
+
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -322,15 +276,15 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
 
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
 
@@ -377,6 +331,7 @@ class Exp_Main(Exp_Basic):
         return
 
     def predict(self, setting, load=False):
+        use_mask = False
         pred_data, pred_loader = self._get_data(flag='pred')
 
         if load:
@@ -391,6 +346,7 @@ class Exp_Main(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(pred_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
+                batch_x_ma, master_mask = self.batch_x_mask(batch_x)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -401,14 +357,14 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 pred = outputs.detach().cpu().numpy()  # .squeeze()
                 preds.append(pred)
 
@@ -423,6 +379,7 @@ class Exp_Main(Exp_Basic):
         np.save(folder_path + 'real_prediction.npy', preds)
 
         return
+
 
 
 
