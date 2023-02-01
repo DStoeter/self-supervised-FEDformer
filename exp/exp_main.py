@@ -11,6 +11,7 @@ from exp.exp_basic import Exp_Basic
 from models import FEDformer, Autoformer, Informer, Transformer
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
 from utils.metrics import metric
+import matplotlib.pyplot as plt
 
 
 warnings.filterwarnings('ignore')
@@ -18,47 +19,6 @@ warnings.filterwarnings('ignore')
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
-
-    @staticmethod
-    def get_rand_mask(shape, mu=5, std=10):
-        batch_size = shape[0]
-        len_ds = shape[1]
-        feature_dim = shape[2]
-        #print("batch_size:",batch_size,"len_ds:", len_ds,"feature_dim:",feature_dim)
-        span_size = int(np.random.normal(mu, std)) + 0.1
-        #print("spansize:",span_size)
-        if span_size < 1:
-            span_size = 1
-        if span_size > 1:
-            span_size = 1
-        n_spans = int(len_ds / span_size)
-        #         print(span_size)
-        mask = np.random.choice([False, True], [batch_size, n_spans, feature_dim], p=[0.8, 0.2])
-
-        if not np.all(np.any(mask, axis=1)):
-            rand_true = np.random.randint(n_spans - 1)
-            mask[:, rand_true, :] = True
-
-        mask = np.repeat(mask, span_size, axis=1)
-        ones = np.zeros([batch_size, len_ds - n_spans * span_size, feature_dim], dtype=bool)
-        mask = np.concatenate([mask, ones], axis=1)
-        return torch.tensor(mask, dtype=bool)
-
-    def batch_x_mask(self, batch_x_f):
-        batch_x_tmp = batch_x_f.detach().cpu().numpy()
-        batch_x_tmp = torch.tensor(batch_x_tmp)
-        shape = batch_x_f.shape
-        mask = self.get_rand_mask(shape)
-        zeros = torch.zeros(batch_x_f.shape, dtype=batch_x_f.dtype)
-
-        batch_x_masked = torch.where(mask, batch_x_tmp, zeros)
-
-        batch_x_masked = batch_x_masked.float().to(self.device)
-
-        mask = mask.to(self.device)
-        enc_input = batch_x_f * mask
-
-        return torch.tensor(enc_input), mask
 
     def _build_model(self):
         model_dict = {
@@ -94,8 +54,6 @@ class Exp_Main(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
-                batch_x_ma, master_mask = self.batch_x_mask(batch_x)
-
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -106,14 +64,14 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(use_mask,master_mask,batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs, enc_out_emb, enc_out_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
@@ -127,8 +85,135 @@ class Exp_Main(Exp_Basic):
         self.model.train()
         return total_loss
 
+    def pre_train(self, setting):
+
+        train_data, train_loader = self._get_data(flag='train')
+        vali_data, vali_loader = self._get_data(flag='val')
+        test_data, test_loader = self._get_data(flag='test')
+
+        pre_train = True
+
+        path = os.path.join(self.args.checkpoints, setting)
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        time_now = time.time()
+
+        train_steps = len(train_loader)
+        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+
+        model_optim = self._select_optimizer()
+        criterion = self._select_criterion()
+
+        if self.args.use_amp:
+            scaler = torch.cuda.amp.GradScaler()
+
+        for epoch in range(self.args.train_epochs):
+            iter_count = 0
+            pre_train_loss = []
+
+            self.model.train()
+            epoch_time = time.time()
+
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+
+                iter_count += 1
+
+                time_series = torch.cat([batch_x[:, :, :], batch_y[:, -42:, :]], dim=1).float().to(self.device)
+                #
+                # print("time series")
+                # time_series_plt = time_series
+                # time_series_plt = time_series_plt.detach().cpu()
+                # plt.rcParams["figure.dpi"] = 100
+                # plt.rcParams['lines.linewidth'] = 0.4
+                # plt.plot(time_series_plt[0], label='Ground Truth')
+                # plt.legend()
+                # plt.show()
+
+
+                model_optim.zero_grad()
+                batch_x = batch_x.float().to(self.device)
+
+                batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
+                batch_y_mark = batch_y_mark.float().to(self.device)
+                # decoder input
+                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
+                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+
+                # encoder - decoder
+                if self.args.use_amp:
+                    with torch.cuda.amp.autocast():
+                        if self.args.output_attention:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, pre_train, batch_y)[0]
+                        else:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, pre_train, batch_y)
+
+                        f_dim = -1 if self.args.features == 'MS' else 0
+                        #batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+
+                        loss = criterion(outputs, time_series)
+                        pre_train_loss.append(loss.item())
+                else:
+                    if self.args.output_attention:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, pre_train, batch_y)[0]
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, pre_train, batch_y)
+
+
+                    f_dim = -1 if self.args.features == 'MS' else 0
+                    # batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+
+                    loss = criterion(outputs, time_series)
+
+                    # time_series_plt = time_series.detach().cpu()
+                    # outputs_plt = outputs.detach().cpu()
+                    # plt.rcParams["figure.dpi"] = 100
+                    # plt.rcParams['lines.linewidth'] = 0.4
+                    # plt.plot(time_series_plt[0], label='Time Series')
+                    # plt.plot(outputs_plt[0], label='Output')
+                    # plt.legend()
+                    # plt.show()
+
+                    pre_train_loss.append(loss.item())
+
+                if (i + 1) % 10 == 0:
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    speed = (time.time() - time_now) / iter_count
+                    left_time = speed * ((self.args.train_epochs // 2 - epoch) * train_steps - i)
+                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                    iter_count = 0
+                    time_now = time.time()
+
+                if self.args.use_amp:
+
+                    scaler.scale(loss).backward()
+                    scaler.step(model_optim)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    model_optim.step()
+
+            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            pre_train_loss = np.average(pre_train_loss)
+            vali_loss = self.vali(vali_data, vali_loader, criterion)
+            test_loss = self.vali(test_data, test_loader, criterion)
+
+            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
+                epoch + 1, train_steps, pre_train_loss, vali_loss, test_loss))
+            early_stopping(vali_loss, self.model, path)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
+
+            adjust_learning_rate(model_optim, epoch + 1, self.args)
+
+        best_model_path = path + '/' + 'checkpoint.pth'
+        self.model.load_state_dict(torch.load(best_model_path))
+
+        return self.model
+
     def train(self, setting):
-        use_mask = True
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
@@ -151,19 +236,14 @@ class Exp_Main(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
+            train_encoder_loss = []
 
             self.model.train()
             epoch_time = time.time()
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
                 iter_count += 1
                 model_optim.zero_grad()
-
                 batch_x = batch_x.float().to(self.device)
-                batch_x_tmp = batch_x
-                batch_x_ma, master_mask = self.batch_x_mask(batch_x_tmp)
-                # print("masked output")
-                # plt.plot(batch_x_ma[0])
-                # plt.show()
 
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -177,44 +257,33 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                         f_dim = -1 if self.args.features == 'MS' else 0
-                        #batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        batch_y = batch_y[:, :, f_dim:].to(self.device)
+                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
                     if self.args.output_attention:
-                        outputs, masking = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)[0:1]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs, masking = self.model(use_mask, master_mask, batch_x_ma, batch_x_mark, batch_y, batch_y_mark)
+                        outputs, enc_out_emb, enc_out_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
-                    #batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    batch_y = batch_y[:, :, f_dim:].to(self.device)
-
+                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    loss_enc = criterion(enc_out_emb, enc_out_loss)
                     loss = criterion(outputs, batch_y)
-                    train_loss.append(loss.item())
+                    train_encoder_loss.append(loss_enc.item())
+                    overall_loss = loss * 0.5 + loss_enc * 0.5
+                    train_loss.append(overall_loss.item())
 
-                if (i + 1) % 20 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
-                    outputs_plt = outputs.detach().cpu()
-                    batch_y_plt = batch_y.detach().cpu()
-                    masking_plt = masking.detach().cpu()
-                    plt.rcParams["figure.dpi"] = 100
-                    plt.rcParams['lines.linewidth'] = 0.3
-                    plt.plot(outputs_plt[0], label='prediction')
-                    plt.plot(batch_y_plt[0], label='groundTruth')
-                    plt.plot(masking_plt[0], label='maskedInput')
-                    plt.legend()
-                    plt.show()
-
+                if (i + 1) % 1 == 0:
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f} | enc_loss: {3:.7f}".format(i + 1, epoch + 1, loss.item(), loss_enc.item()))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    # print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
                     iter_count = 0
                     time_now = time.time()
 
@@ -223,7 +292,8 @@ class Exp_Main(Exp_Basic):
                     scaler.step(model_optim)
                     scaler.update()
                 else:
-                    loss.backward()
+                    # loss.backward()
+                    overall_loss.backward()
                     model_optim.step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
@@ -264,8 +334,6 @@ class Exp_Main(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
-                batch_x_ma, master_mask = self.batch_x_mask(batch_x)
-
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -276,15 +344,15 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs,  = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
 
                     else:
-                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs, enc_out_emb, enc_out_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
 
@@ -319,7 +387,7 @@ class Exp_Main(Exp_Basic):
         print('mse:{}, mae:{}'.format(mse, mae))
         f = open("result.txt", 'a')
         f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}'.format(mse, mae))
+        f.write('mse: {} mae: {}'.format(mse, mae))
         f.write('\n')
         f.write('\n')
         f.close()
@@ -331,7 +399,6 @@ class Exp_Main(Exp_Basic):
         return
 
     def predict(self, setting, load=False):
-        use_mask = False
         pred_data, pred_loader = self._get_data(flag='pred')
 
         if load:
@@ -346,7 +413,6 @@ class Exp_Main(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(pred_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
-                batch_x_ma, master_mask = self.batch_x_mask(batch_x)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -357,14 +423,14 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
-                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
-                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs = self.model(use_mask, master_mask, batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 pred = outputs.detach().cpu().numpy()  # .squeeze()
                 preds.append(pred)
 
@@ -379,16 +445,3 @@ class Exp_Main(Exp_Basic):
         np.save(folder_path + 'real_prediction.npy', preds)
 
         return
-
-
-
-
-
-
-
-
-
-
-
-
-
