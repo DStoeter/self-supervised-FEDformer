@@ -4,7 +4,7 @@ Self-supervised transformer for LTSF based on the [FEDformer](https://github.com
 Copy the datasets you want to work with into the dataset folder.
 Datasets: [Google Drive](https://drive.google.com/drive/folders/1ZOYpTUa82_jCcxIdTmyr0LXQfvaM9vIy?usp=sharing).
 
-First masking approach is in the exp/exp_main.py
+Change the masking parameters manually in the FEDformer model and choose between fix and random masking.
 
 ## Get Started:
 
