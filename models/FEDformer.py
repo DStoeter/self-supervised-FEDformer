@@ -116,6 +116,75 @@ class Model(nn.Module):
             projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
         )
 
+    def mask_tensor_random(self, tensor, percentage, seasonal, seasonal_y):
+
+        shape = tensor.shape
+        shape_y = seasonal_y.shape
+
+        num_elements = shape[1]
+        num_elements_y = shape_y[1]
+
+        if percentage < 0 or percentage > 100:
+                raise ValueError("Percentage value should be between 0 and 100")
+        if percentage == 0:
+            return tensor, seasonal, seasonal_y
+
+        num_zeros = int((100 - percentage) / 100 * num_elements)
+        num_zeros_y = int((100 - percentage) / 100 * num_elements_y)
+
+        mask = torch.zeros((1, num_elements, 1), dtype=torch.float32)
+        mask_y = torch.zeros((1, num_elements_y, 1), dtype=torch.float32)
+
+        mask[0, torch.randperm(num_elements)[:num_zeros], 0] = 1
+        mask_y[0, torch.randperm(num_elements_y)[:num_zeros_y], 0] = 1
+
+        masked_tensor = tensor * mask.to(tensor.device)
+        masked_season = seasonal * mask.to(seasonal.device)
+        masked_season_y = seasonal_y * mask_y.to(seasonal.device)
+
+        return masked_tensor, masked_season, masked_season_y
+
+    def mask_tensor_random_all(self, tensor, percentage):
+
+        shape = tensor.shape
+
+        num_elements = shape[1]
+
+
+        num_zeros = int((100 - percentage) / 100 * num_elements)
+
+
+        mask = torch.zeros((1, num_elements, 1), dtype=torch.float32)
+
+
+        mask[0, torch.randperm(num_elements)[:num_zeros], 0] = 1
+
+
+        masked_tensor = tensor * mask.to(tensor.device)
+
+
+        return masked_tensor
+
+    def mask_tensor_fix(self, enc, dec, dec_s, percentage):
+
+        if percentage < 0 or percentage > 100:
+                raise ValueError("Percentage value should be between 0 and 100")
+        if percentage == 0:
+            return enc, dec, dec_s
+        
+        masked_size_enc = int(enc.shape[1] * percentage / 100)
+        masked_size_dec = int(dec.shape[1] * percentage / 100)
+        mask_enc = torch.zeros(enc.shape)
+        mask_dec = torch.zeros(dec.shape)
+        
+        mask_enc[:, masked_size_enc:, :] = 1
+        mask_dec[:, masked_size_dec:, :] = 1
+        
+        mask_enc = mask_enc.to(enc.device)
+        mask_dec = mask_dec.to(dec.device)
+
+        return enc*mask_enc, dec_s*mask_enc, dec*mask_dec
+
     @staticmethod
     def get_rand_mask(shape, mu=5, std=3):
         batch_size = shape[0]
@@ -127,7 +196,7 @@ class Model(nn.Module):
         if span_size < 1:
             span_size = 1
         n_spans = int(len_ds / span_size)
-        mask = np.random.choice([False, True], [batch_size, n_spans, feature_dim], p=[0.90, 0.10])
+        mask = np.random.choice([False, True], [batch_size, n_spans, feature_dim], p=[0.8, 0.2])
 
         if not np.all(np.any(mask, axis=1)):
             rand_true = np.random.randint(n_spans - 1)
@@ -155,46 +224,31 @@ class Model(nn.Module):
 
         return torch.tensor(dec_input), mask
 
+
+
+
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, pre_train=False, batch_y=None,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
 
         if pre_train:
+
             mean = torch.mean(x_enc, dim=1).unsqueeze(1).repeat(1, 6, 1)
             zeros = torch.zeros([x_dec.shape[0], self.pred_len, x_dec.shape[2]]).to(device)  # cuda()
 
+            #x_enc = self.mask_tensor_random_all(x_enc, 20)
             seasonal_init, trend_init = self.decomp(x_enc)
             seasonal_init_y, trend_init_y = self.decomp(batch_y)
+            enc_out, seasonal_init, seasonal_init_y = self.mask_tensor_random(x_enc, 10, seasonal_init, seasonal_init_y)
+            #enc_out, seasonal_init, seasonal_init_y = self.mask_tensor_fix(x_enc, seasonal_init_y, seasonal_init, 20)
 
-            trend_init = torch.cat([trend_init[:, :, :], trend_init_y[:, -42:, :]], dim=1)
-            seasonal_init = torch.cat([seasonal_init[:, :, :], seasonal_init_y[:, -42:, :]], dim=1)
+            trend_init = torch.cat([trend_init[:, :, :], trend_init_y[:, -(self.pred_len - self.label_len):, :]], dim=1)
+            seasonal_init = torch.cat([seasonal_init[:, :, :], seasonal_init_y[:, -(self.pred_len - self.label_len):, :]], dim=1)
 
             enc_out = self.enc_embedding(x_enc, x_mark_enc)
-
-
             enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
-
-            # seasonal_init, mask = self.mask_init(seasonal_init)
-            # trend_init = trend_init * mask
-
-            # print("Seasonal and Trend plot after masking")
-            # seasonal_init_plt = seasonal_init.detach().cpu()
-            # seasonal_init_plt_y = seasonal_init_y.detach().cpu()
-            # trend_init_plt = trend_init.detach().cpu()
-            # plt.rcParams["figure.dpi"] = 100
-            # plt.rcParams['lines.linewidth'] = 0.4
-            # plt.plot(seasonal_init_plt[0], label='Seasonal')
-            # plt.plot(seasonal_init_plt_y[0], label='Seasonal y')
-            # plt.plot(trend_init_plt[0], label='Trend')
-            # plt.legend()
-            # plt.show()
-
             dec_out = self.dec_embedding(seasonal_init, x_mark_dec)
-
-            dec_out, mask = self.mask_init(dec_out)
-
             seasonal_part, trend_part = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask,
                                                      trend=trend_init)
-
             dec_out = trend_part + seasonal_part
 
             if self.output_attention:
@@ -212,30 +266,18 @@ class Model(nn.Module):
 
             # enc
             enc_out = self.enc_embedding(x_enc, x_mark_enc)
-
-            enc_emb = enc_out
-
-            enc_out, mask = self.mask_init(enc_out)
-
             enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
-
-            enc_out_loss = enc_out
-            # enc = 32, 96, 512
             # dec
             dec_out = self.dec_embedding(seasonal_init, x_mark_dec)
             seasonal_part, trend_part = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask,
                                                      trend=trend_init)
-            # dec = 32, 144, 512
-            # seasonal_part = 32, 144, 1
-            # trend_part = 32, 144, 1
-
             # final
             dec_out = trend_part + seasonal_part
 
             if self.output_attention:
                 return dec_out[:, -self.pred_len:, :], attns
             else:
-                return dec_out[:, -self.pred_len:, :], enc_emb, enc_out_loss  # [B, L, D]
+                return dec_out[:, -self.pred_len:, :]  # [B, L, D]
 
 
 if __name__ == '__main__':
