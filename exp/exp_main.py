@@ -71,7 +71,7 @@ class Exp_Main(Exp_Basic):
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs, enc_out_emb, enc_out_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
@@ -100,7 +100,8 @@ class Exp_Main(Exp_Basic):
         time_now = time.time()
 
         train_steps = len(train_loader)
-        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+        early_stopping = EarlyStopping(patience=self.args.patience - 1, verbose=True)
+
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -119,17 +120,7 @@ class Exp_Main(Exp_Basic):
 
                 iter_count += 1
 
-                time_series = torch.cat([batch_x[:, :, :], batch_y[:, -42:, :]], dim=1).float().to(self.device)
-                #
-                # print("time series")
-                # time_series_plt = time_series
-                # time_series_plt = time_series_plt.detach().cpu()
-                # plt.rcParams["figure.dpi"] = 100
-                # plt.rcParams['lines.linewidth'] = 0.4
-                # plt.plot(time_series_plt[0], label='Ground Truth')
-                # plt.legend()
-                # plt.show()
-
+                time_series = torch.cat([batch_x[:, :, :], batch_y[:, -(self.args.pred_len - self.args.label_len):, :]], dim=1).float().to(self.device)
 
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -166,21 +157,13 @@ class Exp_Main(Exp_Basic):
 
                     loss = criterion(outputs, time_series)
 
-                    # time_series_plt = time_series.detach().cpu()
-                    # outputs_plt = outputs.detach().cpu()
-                    # plt.rcParams["figure.dpi"] = 100
-                    # plt.rcParams['lines.linewidth'] = 0.4
-                    # plt.plot(time_series_plt[0], label='Time Series')
-                    # plt.plot(outputs_plt[0], label='Output')
-                    # plt.legend()
-                    # plt.show()
 
                     pre_train_loss.append(loss.item())
 
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     speed = (time.time() - time_now) / iter_count
-                    left_time = speed * ((self.args.train_epochs // 2 - epoch) * train_steps - i)
+                    left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
                     iter_count = 0
                     time_now = time.time()
@@ -236,7 +219,6 @@ class Exp_Main(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
-            train_encoder_loss = []
 
             self.model.train()
             epoch_time = time.time()
@@ -269,18 +251,16 @@ class Exp_Main(Exp_Basic):
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
-                        outputs, enc_out_emb, enc_out_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss_enc = criterion(enc_out_emb, enc_out_loss)
-                    loss = criterion(outputs, batch_y)
-                    train_encoder_loss.append(loss_enc.item())
-                    overall_loss = loss * 0.5 + loss_enc * 0.5
-                    train_loss.append(overall_loss.item())
 
-                if (i + 1) % 1 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f} | enc_loss: {3:.7f}".format(i + 1, epoch + 1, loss.item(), loss_enc.item()))
+                    loss = criterion(outputs, batch_y)
+                    train_loss.append(loss.item())
+
+                if (i + 1) % 100 == 0:
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
@@ -292,8 +272,7 @@ class Exp_Main(Exp_Basic):
                     scaler.step(model_optim)
                     scaler.update()
                 else:
-                    # loss.backward()
-                    overall_loss.backward()
+                    loss.backward()
                     model_optim.step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
@@ -346,13 +325,13 @@ class Exp_Main(Exp_Basic):
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
-                            outputs,  = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
 
                     else:
-                        outputs, enc_out_emb, enc_out_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
 
