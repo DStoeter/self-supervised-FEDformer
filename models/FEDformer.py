@@ -142,7 +142,7 @@ class Model(nn.Module):
         masked_season = seasonal * mask.to(seasonal.device)
         masked_season_y = seasonal_y * mask_y.to(seasonal.device)
 
-        return masked_tensor, masked_season, masked_season_y
+        return masked_tensor, masked_season_y
 
     def mask_tensor_random_all(self, tensor, percentage):
 
@@ -171,15 +171,15 @@ class Model(nn.Module):
                 raise ValueError("Percentage value should be between 0 and 100")
         if percentage == 0:
             return enc, dec, dec_s
-        
+
         masked_size_enc = int(enc.shape[1] * percentage / 100)
         masked_size_dec = int(dec.shape[1] * percentage / 100)
         mask_enc = torch.zeros(enc.shape)
         mask_dec = torch.zeros(dec.shape)
-        
+
         mask_enc[:, masked_size_enc:, :] = 1
         mask_dec[:, masked_size_dec:, :] = 1
-        
+
         mask_enc = mask_enc.to(enc.device)
         mask_dec = mask_dec.to(dec.device)
 
@@ -238,13 +238,15 @@ class Model(nn.Module):
             #x_enc = self.mask_tensor_random_all(x_enc, 20)
             seasonal_init, trend_init = self.decomp(x_enc)
             seasonal_init_y, trend_init_y = self.decomp(batch_y)
-            enc_out, seasonal_init, seasonal_init_y = self.mask_tensor_random(x_enc, 10, seasonal_init, seasonal_init_y)
-            #enc_out, seasonal_init, seasonal_init_y = self.mask_tensor_fix(x_enc, seasonal_init_y, seasonal_init, 20)
+
+            x_enc, seasonal_init_y = self.mask_tensor_random(x_enc, 10, seasonal_init, seasonal_init_y)
+            #enc_out, seasonal_init, seasonal_init_y = self.mask_tensor_fix(x_enc, seasonal_init_y, seasonal_init, 60)
 
             trend_init = torch.cat([trend_init[:, :, :], trend_init_y[:, -(self.pred_len - self.label_len):, :]], dim=1)
             seasonal_init = torch.cat([seasonal_init[:, :, :], seasonal_init_y[:, -(self.pred_len - self.label_len):, :]], dim=1)
 
             enc_out = self.enc_embedding(x_enc, x_mark_enc)
+
             enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
             dec_out = self.dec_embedding(seasonal_init, x_mark_dec)
             seasonal_part, trend_part = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask,
