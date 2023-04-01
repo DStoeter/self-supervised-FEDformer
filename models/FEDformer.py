@@ -116,7 +116,7 @@ class Model(nn.Module):
             projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
         )
 
-    def mask_tensor_random(self, tensor, percentage, seasonal, seasonal_y):
+    def mask_tensor_random(self, tensor, percentage, seasonal, trend, trend_y, seasonal_y):
 
         shape = tensor.shape
         shape_y = seasonal_y.shape
@@ -140,28 +140,20 @@ class Model(nn.Module):
 
         masked_tensor = tensor * mask.to(tensor.device)
         masked_season = seasonal * mask.to(seasonal.device)
+        masked_trend = trend * mask.to(seasonal.device)
         masked_season_y = seasonal_y * mask_y.to(seasonal.device)
+        masked_trend_y = trend_y * mask_y.to(seasonal.device)
 
-        return masked_tensor, masked_season_y
+        return masked_tensor, masked_season, masked_trend, masked_trend_y, masked_season_y
 
     def mask_tensor_random_all(self, tensor, percentage):
 
         shape = tensor.shape
-
         num_elements = shape[1]
-
-
         num_zeros = int((100 - percentage) / 100 * num_elements)
-
-
         mask = torch.zeros((1, num_elements, 1), dtype=torch.float32)
-
-
         mask[0, torch.randperm(num_elements)[:num_zeros], 0] = 1
-
-
         masked_tensor = tensor * mask.to(tensor.device)
-
 
         return masked_tensor
 
@@ -235,12 +227,21 @@ class Model(nn.Module):
             mean = torch.mean(x_enc, dim=1).unsqueeze(1).repeat(1, 6, 1)
             zeros = torch.zeros([x_dec.shape[0], self.pred_len, x_dec.shape[2]]).to(device)  # cuda()
 
+            #masking whole time series
             #x_enc = self.mask_tensor_random_all(x_enc, 20)
+
             seasonal_init, trend_init = self.decomp(x_enc)
             seasonal_init_y, trend_init_y = self.decomp(batch_y)
 
-            x_enc, seasonal_init_y = self.mask_tensor_random(x_enc, 10, seasonal_init, seasonal_init_y)
-            #enc_out, seasonal_init, seasonal_init_y = self.mask_tensor_fix(x_enc, seasonal_init_y, seasonal_init, 60)
+
+            #encoder masking
+            x_enc, _, _, _, seasonal_init_y = self.mask_tensor_random(x_enc, 30, seasonal_init, trend_init, trend_init_y, seasonal_init_y)
+            #x_enc, _, seasonal_init_y = self.mask_tensor_fix(x_enc, seasonal_init_y, seasonal_init, 40)
+
+            #decoder masking
+            #_, seasonal_init, _, _, seasonal_init_y = self.mask_tensor_random(x_enc, 40, seasonal_init, trend_init, trend_init_y, seasonal_init_y)
+
+            #_, seasonal_init, seasonal_init_y = self.mask_tensor_fix(x_enc, seasonal_init_y, seasonal_init, 20)
 
             trend_init = torch.cat([trend_init[:, :, :], trend_init_y[:, -(self.pred_len - self.label_len):, :]], dim=1)
             seasonal_init = torch.cat([seasonal_init[:, :, :], seasonal_init_y[:, -(self.pred_len - self.label_len):, :]], dim=1)
